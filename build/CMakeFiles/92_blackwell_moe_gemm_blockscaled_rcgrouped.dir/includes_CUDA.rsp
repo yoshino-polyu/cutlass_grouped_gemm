@@ -1,0 +1,1 @@
+-I"/home/xule/sm100-grouped-gemm/include" -isystem "/usr/local/cuda/targets/x86_64-linux/include"
