@@ -1505,6 +1505,30 @@ If you need a different compute capability (e.g., SM101), adjust:
 cmake .. -DCMAKE_CUDA_ARCHITECTURES="101a"
 ```
 
+### Rebuild after modifying source code
+
+After editing `92_blackwell_moe_gemm_blockscaled_rcgrouped.cu`, you do **not** need to
+re-run `cmake`. CMake/make tracks source dependencies automatically, so an incremental
+rebuild is simply:
+
+```bash
+cd build
+make -j$(nproc)
+```
+
+`make` detects that the `.cu` file changed and recompiles only what is necessary.
+If you also changed any header files under `include/`, the same command handles that too.
+
+> **Tip:** If you ever want a clean rebuild from scratch (e.g., after changing
+> `CMakeLists.txt` or switching CUDA toolkits), delete the build directory and
+> start over:
+> ```bash
+> rm -rf build
+> mkdir build && cd build
+> cmake .. -DCMAKE_CUDA_ARCHITECTURES="100a"
+> make -j$(nproc)
+> ```
+
 ## Run
 
 ```bash
