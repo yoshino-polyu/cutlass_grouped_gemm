@@ -19,6 +19,10 @@ def gen_module():
     sources = [
         SUBDIR / "layout_check.cu",
         SUBDIR / "layout_check_binding.cu",
+        SUBDIR / "sfa_check.cu",
+        SUBDIR / "sfa_check_binding.cu",
+        SUBDIR / "gemm_check.cu",
+        SUBDIR / "gemm_check_binding.cu",
     ]
     extra_cuda_cflags = sm100a_nvcc_flags + [
         "--expt-relaxed-constexpr",
