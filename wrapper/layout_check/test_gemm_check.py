@@ -13,7 +13,92 @@ Layout summary:
 B in CUTLASS is ColumnMajor with stride {K, 1, 0}. A PyTorch [N, K]
 contiguous tensor has stride [K, 1] — identical physical layout.
 
-Run: python -m wrapper.layout_check.test_gemm_check
+Run:  cd /home/xule/sm100-grouped-gemm && python -m wrapper.layout_check.test_gemm_check
+
+Call stack (within sm100-grouped-gemm/):
+===========================================================================
+
+  test_gemm_check.py  (__main__)
+  │
+  ├─ test_gemm_check_uniform()
+  │   │
+  │   └─ ─ ─ (same call chain as below) ─ ─ ─
+  │
+  └─ test_gemm_check_variable_n()
+      │
+      │  ┌──────────────────── JIT build & load ────────────────────┐
+      │  │                                                          │
+      ├──┤  get_layout_check_module()                               │
+      │  │    wrapper/layout_check/layout_check_jit.py:47           │
+      │  │    │                                                     │
+      │  │    └─ gen_module().build_and_load()                      │
+      │  │         │                                                │
+      │  │         ├─ gen_module()  (layout_check_jit.py:17)        │
+      │  │         │   └─ gen_jit_spec()  (jit_utils/core.py:118)   │
+      │  │         │       └─ returns JitSpec(name="layout_check",  │
+      │  │         │            sources=[layout_check.cu,            │
+      │  │         │              layout_check_binding.cu,           │
+      │  │         │              sfa_check.cu,                      │
+      │  │         │              sfa_check_binding.cu,              │
+      │  │         │              gemm_check.cu,                     │
+      │  │         │              gemm_check_binding.cu])            │
+      │  │         │                                                │
+      │  │         └─ JitSpec.build_and_load()                      │
+      │  │              (jit_utils/core.py:110)                     │
+      │  │              │                                           │
+      │  │              ├─ .build()                                 │
+      │  │              │   ├─ .write_ninja()                       │
+      │  │              │   │   └─ generate_ninja_build_for_op()    │
+      │  │              │   │       (jit_utils/cpp_ext.py:177)      │
+      │  │              │   └─ run_ninja()                          │
+      │  │              │       (jit_utils/cpp_ext.py:268)          │
+      │  │              │       └─ subprocess: ninja + nvcc         │
+      │  │              │           → layout_check.so               │
+      │  │              │                                           │
+      │  │              └─ .load(so_path)                           │
+      │  │                  └─ tvm_ffi.load_module()                │
+      │  │                     → returns mod with FFI exports       │
+      │  │                                                          │
+      │  └──────────────────────────────────────────────────────────┘
+      │
+      │  ┌──────── Python calls into CUDA via TVM FFI ─────────────┐
+      │  │                                                          │
+      ├──┤  mod["get_sfa_size"](M, K, E)                           │
+      │  │    → TVM_FFI_DLL_EXPORT: get_sfa_size                   │
+      │  │      (sfa_check_binding.cu:11)                           │
+      │  │      → get_sfa_size_run()  (sfa_check.cu)               │
+      │  │                                                          │
+      ├──┤  mod["get_sfb_size"](M, N_i, K)                         │
+      │  │    → TVM_FFI_DLL_EXPORT: get_sfb_size                   │
+      │  │      (gemm_check_binding.cu:15)                          │
+      │  │      → get_sfb_size_run()  (gemm_check.cu:144)          │
+      │  │                                                          │
+      └──┤  mod["gemm_check"](w_fp8, w_sfa, w_act, w_sfb,         │
+         │                     offsets_B, offsets_SFB, alpha, beta) │
+         │    → TVM_FFI_DLL_EXPORT: gemm_check                     │
+         │      (gemm_check_binding.cu:16)                          │
+         │      → gemm_check_run()  (gemm_check.cu:161)            │
+         │         │                                                │
+         │         ├─ cudaMemcpy offsets to host                    │
+         │         ├─ build per-expert ptr_B[], ptr_SFB[] arrays    │
+         │         ├─ allocate C, D, SFD per expert                 │
+         │         │                                                │
+         │         ├─ CUTLASS kernel launch:                        │
+         │         │   Gemm = GemmUniversalAdapter<GemmKernel>      │
+         │         │   (gemm_check.cu:98)                           │
+         │         │   ├─ Gemm::get_workspace_size(args)            │
+         │         │   ├─ Gemm::can_implement(args)                 │
+         │         │   ├─ Gemm::initialize(args, workspace)         │
+         │         │   └─ Gemm::run()  → CUDA kernel on GPU        │
+         │         │       └─ cudaDeviceSynchronize()               │
+         │         │                                                │
+         │         └─ CPU reference verification (per expert):      │
+         │             ├─ cutlass::reference::host::Gemm3x()        │
+         │             ├─ block_D[i].sync_host()                    │
+         │             └─ TensorEquals(ref_D, D)                    │
+         │               → prints "Disposition: Passed/Failed"      │
+         │                                                          │
+         └──────────────────────────────────────────────────────────┘
 
 Bugs found during development:
 ===========================================================================
@@ -91,8 +176,9 @@ def test_gemm_check_variable_n():
     # E8M0 encoding: byte value v → scale = 2^(v-127)
     # Values 126-130 → scales 0.5, 1.0, 2.0, 4.0, 8.0
     sfa_size = mod["get_sfa_size"](M, K, E)
+    print(f"  SFA: size={sfa_size} (type={type(sfa_size)})")
     w_sfa = torch.randint(126, 131, (sfa_size,), dtype=torch.uint8, device="cuda")
-    print(f"  SFA: size={sfa_size}")
+    print(f"  SFA: value of sfa_size = {sfa_size}")
 
     # B: packed [total_tokens, K] — all experts' tokens concatenated
     total_tokens = sum(tokens_per_expert)
@@ -108,6 +194,7 @@ def test_gemm_check_variable_n():
 
     # SFB: packed [total_sfb] — sfb_size varies with N_i
     sfb_sizes = [mod["get_sfb_size"](M, n, K) for n in tokens_per_expert]
+    print(f"sfb_sizes contents: {sfb_sizes}")
     total_sfb = sum(sfb_sizes)
     w_sfb = torch.randint(126, 131, (total_sfb,), dtype=torch.uint8, device="cuda")
 
